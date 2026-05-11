@@ -1,0 +1,46 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: epidemic-data-quality-monitor
+  labels:
+    app: epidemic-data-quality-monitor
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: epidemic-data-quality-monitor
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: data-quality-monitor
+          image: python:3.11-slim
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              pip install psycopg2-binary --target=/tmp/pkgs --quiet
+              PYTHONPATH=/tmp/pkgs python /app/data_quality_monitor.py --live
+          env:
+            - name: DB_HOST
+              value: "timescaledb-service"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_NAME
+              value: "analytics"
+            - name: DB_USER
+              value: "postgres"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: timescaledb-secret
+                  key: POSTGRES_PASSWORD
+            - name: STALE_HOURS
+              value: "8"
+          volumeMounts:
+            - name: data-quality-code
+              mountPath: /app
+      volumes:
+        - name: data-quality-code
+          configMap:
+            name: data-quality-code

@@ -1,0 +1,108 @@
+# =============================================================================
+# spark-cronjob.yaml — Kubernetes CronJob for Phase 2 Spark Analytics Job
+#
+# Runs the epidemic-analytics job every 6 hours using a pre-built Spark image.
+# The etl.py script is mounted via ConfigMap (etl-script). Python dependencies
+# are pip-installed at runtime since build pods lack outbound internet access.
+#
+# Deploy:
+#   oc create configmap etl-script --from-file=etl.py=spark/etl.py -n ds551-2026-spring-7726b8
+#   oc apply -f infra/spark-rbac.yaml -n ds551-2026-spring-7726b8
+#   oc apply -f infra/spark-cronjob.yaml -n ds551-2026-spring-7726b8
+#
+# Trigger a manual run:
+#   oc create job --from=cronjob/epidemic-analytics manual-run-1 \
+#     -n ds551-2026-spring-7726b8
+#
+# Check job status:
+#   oc get jobs -n ds551-2026-spring-7726b8
+#   oc logs -l job-name=epidemic-analytics-<timestamp> -n ds551-2026-spring-7726b8
+# =============================================================================
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: epidemic-analytics
+  namespace: ds551-2026-spring-7726b8
+spec:
+  # Run every 6 hours
+  schedule: "0 */6 * * *"
+
+  # Keep last 3 successful and 1 failed job for log inspection
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+
+  # If a scheduled run is still running when the next one is due, skip the new run
+  concurrencyPolicy: Forbid
+
+  jobTemplate:
+    spec:
+      # Retry once on failure before giving up
+      backoffLimit: 1
+
+      template:
+        metadata:
+          labels:
+            app: epidemic-analytics
+        spec:
+          serviceAccountName: spark-sa
+          restartPolicy: OnFailure
+
+          containers:
+          - name: spark-job
+            image: apache/spark:3.5.0
+            imagePullPolicy: IfNotPresent
+
+            command: ["/bin/bash", "-c"]
+            args:
+              - |
+                pip install --quiet --no-cache-dir --target=/tmp/pkgs psycopg2-binary==2.9.9 &&
+                export PYTHONPATH=/tmp/pkgs:$PYTHONPATH &&
+                /opt/spark/bin/spark-submit \
+                  --master local[*] \
+                  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.postgresql:postgresql:42.6.0 \
+                  --conf spark.driver.extraJavaOptions=-Divy.cache.dir=/tmp/ivy2 \
+                  --conf spark.jars.ivy=/tmp/ivy2 \
+                  /app/etl.py
+
+            resources:
+              requests:
+                memory: "1Gi"
+                cpu: "500m"
+              limits:
+                memory: "2Gi"
+                cpu: "1000m"
+
+            volumeMounts:
+            - name: etl-script
+              mountPath: /app
+
+            env:
+            # Kafka connectivity
+            - name: KAFKA_BOOTSTRAP
+              value: "kafka.ds551-2026-spring-7726b8.svc.cluster.local:9092"
+
+            # TimescaleDB connectivity — host/port/name from service DNS
+            - name: DB_HOST
+              value: "timescaledb-service.ds551-2026-spring-7726b8.svc.cluster.local"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_NAME
+              value: "analytics"
+
+            # Database credentials from the timescaledb-secret
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: timescaledb-secret
+                  key: POSTGRES_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: timescaledb-secret
+                  key: POSTGRES_PASSWORD
+
+          volumes:
+          - name: etl-script
+            configMap:
+              name: etl-script

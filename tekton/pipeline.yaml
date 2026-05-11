@@ -1,0 +1,62 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: epidemic-engine-phase1
+spec:
+  params:
+    - name: kafka-bootstrap
+      type: string
+    - name: input-topic
+      type: string
+    - name: validated-topic
+      type: string
+    - name: symptom-topic
+      type: string
+    - name: clinic-topic
+      type: string
+    - name: hospital-topic
+      type: string
+    - name: vaccination-topic
+      type: string
+    - name: team-id
+      type: string
+    - name: batch-size
+      type: string
+      default: "25"
+
+  tasks:
+    - name: validate-events-task
+      taskRef:
+        name: validate-events
+      params:
+        - name: kafka-bootstrap
+          value: "$(params.kafka-bootstrap)"
+        - name: input-topic
+          value: "$(params.input-topic)"
+        - name: output-topic
+          value: "$(params.validated-topic)"
+        - name: batch-size
+          value: "$(params.batch-size)"
+
+    - name: route-and-enrich-task
+      runAfter:
+        - validate-events-task
+      taskRef:
+        name: route-and-enrich
+      params:
+        - name: kafka-bootstrap
+          value: "$(params.kafka-bootstrap)"
+        - name: input-topic
+          value: "$(params.validated-topic)"
+        - name: symptom-topic
+          value: "$(params.symptom-topic)"
+        - name: clinic-topic
+          value: "$(params.clinic-topic)"
+        - name: hospital-topic
+          value: "$(params.hospital-topic)"
+        - name: vaccination-topic
+          value: "$(params.vaccination-topic)"
+        - name: team-id
+          value: "$(params.team-id)"
+        - name: batch-size
+          value: "$(params.batch-size)"

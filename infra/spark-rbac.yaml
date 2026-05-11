@@ -1,0 +1,63 @@
+# =============================================================================
+# spark-rbac.yaml — ServiceAccount and RBAC for the Spark CronJob
+#
+# The CronJob pod runs as spark-sa, which needs permission to:
+#   - Read secrets (for database credentials)
+#   - Create and manage pods (if using Spark cluster mode later)
+#
+# Deploy:
+#   oc apply -f infra/spark-rbac.yaml -n ds551-2026-spring-7726b8
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# ServiceAccount — identity for the Spark job pod
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spark-sa
+  namespace: ds551-2026-spring-7726b8
+
+---
+# -----------------------------------------------------------------------------
+# Role — permissions needed by the Spark job within the namespace
+# -----------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: spark-role
+  namespace: ds551-2026-spring-7726b8
+rules:
+  # Read secrets to access database credentials
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+  # Read configmaps (for future alerting threshold config)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+  # Pod management — needed if Spark launches executor pods in cluster mode
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "create", "delete", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list"]
+
+---
+# -----------------------------------------------------------------------------
+# RoleBinding — bind spark-role to spark-sa
+# -----------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spark-rolebinding
+  namespace: ds551-2026-spring-7726b8
+subjects:
+  - kind: ServiceAccount
+    name: spark-sa
+    namespace: ds551-2026-spring-7726b8
+roleRef:
+  kind: Role
+  name: spark-role
+  apiGroup: rbac.authorization.k8s.io

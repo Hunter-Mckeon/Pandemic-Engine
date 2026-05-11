@@ -1,0 +1,307 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: validate-events
+spec:
+  params:
+    - name: kafka-bootstrap
+      type: string
+    - name: input-topic
+      type: string
+    - name: output-topic
+      type: string
+    - name: batch-size
+      type: string
+      default: "25"
+  steps:
+    - name: validate
+      image: python:3.11-slim
+      computeResources:
+        requests:
+          memory: "256Mi"
+          cpu: "250m"
+        limits:
+          memory: "2Gi"
+          cpu: "1"
+      script: |
+        #!/usr/bin/env sh
+        set -eu
+
+        pip install kafka-python-ng --target=/tmp/pkgs --quiet
+
+        PYTHONPATH=/tmp/pkgs python3 - <<'PYEOF'
+        import sys
+        sys.path.insert(0, "/tmp/pkgs")
+
+        import json
+        from datetime import datetime
+        from kafka import KafkaConsumer, KafkaProducer, TopicPartition
+
+        bootstrap = "$(params.kafka-bootstrap)"
+        input_topic = "$(params.input-topic)"
+        output_topic = "$(params.output-topic)"
+        batch_size = int("$(params.batch-size)")
+
+        base_required_fields = ["event_type", "timestamp", "region"]
+        vaccination_required_fields = [
+            "event_type",
+            "schema_version",
+            "timestamp",
+            "record_id",
+            "patient_id",
+            "region",
+            "vaccine_type",
+            "dose_number",
+            "administered_at",
+        ]
+
+        def valid_iso8601(ts: str) -> bool:
+            try:
+                datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                return True
+            except Exception:
+                return False
+
+        def safe_deserializer(m):
+            try:
+                return json.loads(m.decode("utf-8"))
+            except Exception as e:
+                print(f"INVALID bad_json error={e}")
+                return None
+
+        consumer = KafkaConsumer(
+            bootstrap_servers=bootstrap,
+            group_id="team05-validate-events-phase3-vax",
+            auto_offset_reset="earliest",
+            enable_auto_commit=False,
+            consumer_timeout_ms=15000,
+            value_deserializer=safe_deserializer,
+        )
+
+        partitions = consumer.partitions_for_topic(input_topic)
+        if not partitions:
+            print(f"NO_PARTITIONS topic={input_topic}")
+            consumer.close()
+            raise SystemExit(0)
+
+        topic_partitions = [TopicPartition(input_topic, p) for p in partitions]
+        consumer.assign(topic_partitions)
+
+        producer = KafkaProducer(
+            bootstrap_servers=bootstrap,
+            value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+        )
+
+        total_seen = 0
+        valid_count = 0
+        invalid_count = 0
+
+        for message in consumer:
+            event = message.value
+
+            if event is None:
+                total_seen += 1
+                invalid_count += 1
+                if total_seen >= batch_size:
+                    break
+                continue
+
+            total_seen += 1
+
+            event_type = event.get("event_type")
+            required_fields = (
+                vaccination_required_fields
+                if event_type == "vaccination_record"
+                else base_required_fields
+            )
+
+            missing = [f for f in required_fields if f not in event or event[f] in (None, "")]
+            if missing:
+                print(f"INVALID missing_fields={missing} event_type={event_type}")
+                invalid_count += 1
+                if total_seen >= batch_size:
+                    break
+                continue
+
+            if not valid_iso8601(str(event["timestamp"])):
+                print(f"INVALID bad_timestamp event_type={event_type}")
+                invalid_count += 1
+                if total_seen >= batch_size:
+                    break
+                continue
+
+            if event_type == "vaccination_record":
+                if str(event.get("schema_version")) != "2":
+                    print(f"INVALID bad_schema_version event_type={event_type} schema_version={event.get('schema_version')}")
+                    invalid_count += 1
+                    if total_seen >= batch_size:
+                        break
+                    continue
+                try:
+                    dose_number = int(event.get("dose_number"))
+                    if dose_number < 1:
+                        raise ValueError("dose_number must be >= 1")
+                except Exception as e:
+                    print(f"INVALID bad_dose_number event_type={event_type} error={e}")
+                    invalid_count += 1
+                    if total_seen >= batch_size:
+                        break
+                    continue
+                if not valid_iso8601(str(event["administered_at"])):
+                    print(f"INVALID bad_administered_at event_type={event_type}")
+                    invalid_count += 1
+                    if total_seen >= batch_size:
+                        break
+                    continue
+
+            producer.send(output_topic, event)
+            valid_count += 1
+            print(f"VALID forwarded event_type={event_type} to {output_topic}")
+
+            if total_seen >= batch_size:
+                break
+
+        producer.flush()
+        consumer.commit()
+        consumer.close()
+
+        print(f"SUMMARY total_seen={total_seen} valid={valid_count} invalid={invalid_count} output_topic={output_topic}")
+        PYEOF
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: route-and-enrich
+spec:
+  params:
+    - name: kafka-bootstrap
+      type: string
+    - name: input-topic
+      type: string
+    - name: symptom-topic
+      type: string
+    - name: clinic-topic
+      type: string
+    - name: hospital-topic
+      type: string
+    - name: vaccination-topic
+      type: string
+    - name: team-id
+      type: string
+    - name: batch-size
+      type: string
+      default: "25"
+  steps:
+    - name: route
+      image: python:3.11-slim
+      computeResources:
+        requests:
+          memory: "256Mi"
+          cpu: "250m"
+        limits:
+          memory: "2Gi"
+          cpu: "1"
+      script: |
+        #!/usr/bin/env sh
+        set -eu
+
+        pip install kafka-python-ng --target=/tmp/pkgs --quiet
+
+        PYTHONPATH=/tmp/pkgs python3 - <<'PYEOF'
+        import sys
+        sys.path.insert(0, "/tmp/pkgs")
+
+        import json
+        from datetime import datetime, timezone
+        from kafka import KafkaConsumer, KafkaProducer, TopicPartition
+
+        bootstrap = "$(params.kafka-bootstrap)"
+        input_topic = "$(params.input-topic)"
+        symptom_topic = "$(params.symptom-topic)"
+        clinic_topic = "$(params.clinic-topic)"
+        hospital_topic = "$(params.hospital-topic)"
+        vaccination_topic = "$(params.vaccination-topic)"
+        team_id = "$(params.team-id)"
+        batch_size = int("$(params.batch-size)")
+
+        route_map = {
+            "symptom_report": symptom_topic,
+            "clinic_visit": clinic_topic,
+            "hospital_admission": hospital_topic,
+            "vaccination_record": vaccination_topic,
+        }
+
+        def safe_deserializer(m):
+            try:
+                return json.loads(m.decode("utf-8"))
+            except Exception as e:
+                print(f"DROPPED bad_json error={e}")
+                return None
+
+        consumer = KafkaConsumer(
+            bootstrap_servers=bootstrap,
+            group_id="team05-route-enrich-phase3-vax",
+            auto_offset_reset="earliest",
+            enable_auto_commit=False,
+            consumer_timeout_ms=15000,
+            value_deserializer=safe_deserializer,
+        )
+
+        partitions = consumer.partitions_for_topic(input_topic)
+        if not partitions:
+            print(f"NO_PARTITIONS topic={input_topic}")
+            consumer.close()
+            raise SystemExit(0)
+
+        topic_partitions = [TopicPartition(input_topic, p) for p in partitions]
+        consumer.assign(topic_partitions)
+
+        producer = KafkaProducer(
+            bootstrap_servers=bootstrap,
+            value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+        )
+
+        processed = 0
+        routed = 0
+        dropped = 0
+
+        for message in consumer:
+            event = message.value
+
+            if event is None:
+                processed += 1
+                dropped += 1
+                if processed >= batch_size:
+                    break
+                continue
+
+            processed += 1
+
+            event["team_id"] = team_id
+            event["processing_timestamp"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            event["event_source"] = "ds551-event-generator"
+
+            event_type = event.get("event_type")
+            output_topic = route_map.get(event_type)
+
+            if output_topic is None:
+                dropped += 1
+                print(f"DROPPED unroutable event_type={event_type}")
+                if processed >= batch_size:
+                    break
+                continue
+
+            producer.send(output_topic, event)
+            routed += 1
+            print(f"ROUTED event_type={event_type} to {output_topic}")
+
+            if processed >= batch_size:
+                break
+
+        producer.flush()
+        consumer.commit()
+        consumer.close()
+
+        print(f"SUMMARY processed={processed} routed={routed} dropped={dropped}")
+        print(f"TOPICS symptom={symptom_topic} clinic={clinic_topic} hospital={hospital_topic} vaccination={vaccination_topic}")
+        PYEOF

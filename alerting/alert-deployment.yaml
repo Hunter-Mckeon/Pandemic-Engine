@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: epidemic-alerting
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: epidemic-alerting
+  template:
+    metadata:
+      labels:
+        app: epidemic-alerting
+    spec:
+      containers:
+        - name: alerting
+          image: python:3.11-slim
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              pip install psycopg2-binary --target=/tmp/pkgs --quiet
+              PYTHONPATH=/tmp/pkgs python /app/alert_service.py
+          env:
+            - name: DB_HOST
+              value: "timescaledb-service"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_NAME
+              value: "analytics"
+            - name: DB_USER
+              value: "postgres"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: timescaledb-secret
+                  key: POSTGRES_PASSWORD
+            - name: POLL_SECONDS
+              value: "60"
+            - name: COOLDOWN_SECONDS
+              value: "300"
+            - name: EVENT_WARNING_THRESHOLD
+              value: "5"
+            - name: EVENT_CRITICAL_THRESHOLD
+              value: "10"
+            - name: SEVERITY_WARNING_THRESHOLD
+              value: "2.5"
+            - name: SEVERITY_CRITICAL_THRESHOLD
+              value: "3.5"
+            - name: BED_WARNING_THRESHOLD
+              value: "100"
+            - name: BED_CRITICAL_THRESHOLD
+              value: "50"
+            - name: VACCINATION_LOW_THRESHOLD
+              value: "1"
+            - name: VACCINATION_SURGE_THRESHOLD
+              value: "30"
+            - name: STALE_HOURS
+              value: "8"
+            - name: SLACK_WEBHOOK_URL
+              value: ""
+          volumeMounts:
+            - name: alert-code
+              mountPath: /app
+      volumes:
+        - name: alert-code
+          configMap:
+            name: alerting-code

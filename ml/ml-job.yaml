@@ -1,0 +1,46 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: epidemic-outbreak-prediction
+  namespace: ds551-2026-spring-7726b8
+  labels:
+    app: epidemic-outbreak-prediction
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app: epidemic-outbreak-prediction
+    spec:
+      restartPolicy: Never
+      serviceAccountName: spark-sa
+      containers:
+        - name: outbreak-prediction
+          image: python:3.11-slim
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              pip install psycopg2-binary --target=/tmp/pkgs --quiet
+              PYTHONPATH=/tmp/pkgs python /app/outbreak_prediction.py --live
+          env:
+            - name: DB_HOST
+              value: "timescaledb-service"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_NAME
+              value: "analytics"
+            - name: DB_USER
+              value: "postgres"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: timescaledb-secret
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - name: outbreak-prediction-code
+              mountPath: /app
+      volumes:
+        - name: outbreak-prediction-code
+          configMap:
+            name: outbreak-prediction-code

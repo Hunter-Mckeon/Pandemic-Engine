@@ -1,0 +1,30 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: epidemic-engine-phase1-vax-real-
+  labels:
+    evidence-purpose: co2026-01-validation
+  annotations:
+    note: "Evidence-only CO-2026-01 run using the real raw topic; not a temp-topic demo."
+spec:
+  pipelineRef:
+    name: epidemic-engine-phase1
+  params:
+    - name: kafka-bootstrap
+      value: "kafka-team05:9092"
+    - name: input-topic
+      value: "ds551-s26.team05.raw"
+    - name: validated-topic
+      value: "ds551-s26.team05.validated"
+    - name: symptom-topic
+      value: "ds551-s26.team05.symptom_reports"
+    - name: clinic-topic
+      value: "ds551-s26.team05.clinic_visits"
+    - name: hospital-topic
+      value: "ds551-s26.team05.hospital_admissions"
+    - name: vaccination-topic
+      value: "ds551-s26.team05.vaccination_records"
+    - name: team-id
+      value: "team05"
+    - name: batch-size
+      value: "100"

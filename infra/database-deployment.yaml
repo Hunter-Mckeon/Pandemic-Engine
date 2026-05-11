@@ -1,0 +1,188 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: timescaledb-secret
+  namespace: ds551-2026-spring-7726b8
+type: Opaque
+stringData:
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: team05-epidemic
+  POSTGRES_DB: analytics
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: timescaledb-pvc
+  namespace: ds551-2026-spring-7726b8
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: timescaledb
+  namespace: ds551-2026-spring-7726b8
+  labels:
+    app: timescaledb
+spec:
+  serviceName: timescaledb-service
+  replicas: 1
+  selector:
+    matchLabels:
+      app: timescaledb
+  template:
+    metadata:
+      labels:
+        app: timescaledb
+    spec:
+      containers:
+        - name: timescaledb
+          image: timescale/timescaledb:latest-pg15
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: timescaledb-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: timescaledb-secret
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: timescaledb-secret
+                  key: POSTGRES_DB
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: timescaledb-data
+              mountPath: /var/lib/postgresql/data
+            - name: init-scripts
+              mountPath: /docker-entrypoint-initdb.d
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+      volumes:
+        - name: timescaledb-data
+          persistentVolumeClaim:
+            claimName: timescaledb-pvc
+        - name: init-scripts
+          configMap:
+            name: timescaledb-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: timescaledb-service
+  namespace: ds551-2026-spring-7726b8
+  labels:
+    app: timescaledb
+spec:
+  selector:
+    app: timescaledb
+  ports:
+    - port: 5432
+      targetPort: 5432
+      protocol: TCP
+  type: ClusterIP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: timescaledb-init
+  namespace: ds551-2026-spring-7726b8
+data:
+  init.sql: |
+    -- Enable TimescaleDB extension
+    CREATE EXTENSION IF NOT EXISTS timescaledb;
+
+    -- Analytics 1: Hourly event rate by type and region
+    CREATE TABLE IF NOT EXISTS hourly_event_rate (
+        hour        TIMESTAMPTZ NOT NULL,
+        event_type  TEXT        NOT NULL,
+        region      TEXT        NOT NULL,
+        event_count INTEGER     NOT NULL
+    );
+    SELECT create_hypertable('hourly_event_rate', 'hour', if_not_exists => TRUE);
+
+    -- Analytics 2: Severity trend over time
+    CREATE TABLE IF NOT EXISTS severity_trend (
+        window_start TIMESTAMPTZ      NOT NULL,
+        window_end   TIMESTAMPTZ      NOT NULL,
+        region       TEXT              NOT NULL,
+        event_type   TEXT              NOT NULL,
+        avg_severity DOUBLE PRECISION  NOT NULL,
+        sample_count BIGINT            NOT NULL DEFAULT 0
+    );
+    SELECT create_hypertable('severity_trend', 'window_start', if_not_exists => TRUE);
+
+    -- Analytics 3: Bed availability pressure
+    CREATE TABLE IF NOT EXISTS bed_availability (
+        hour              TIMESTAMPTZ      NOT NULL,
+        region            TEXT              NOT NULL,
+        avg_available_beds DOUBLE PRECISION NOT NULL,
+        min_available_beds INTEGER          NOT NULL,
+        sample_count       BIGINT           NOT NULL DEFAULT 0
+    );
+    SELECT create_hypertable('bed_availability', 'hour', if_not_exists => TRUE);
+
+    -- Analytics 4 / CO-2026-01: Vaccination trend
+    CREATE TABLE IF NOT EXISTS vaccination_trend (
+        hour              TIMESTAMPTZ NOT NULL,
+        region            TEXT        NOT NULL,
+        vaccine_type      TEXT        NOT NULL,
+        dose_number       INTEGER     NOT NULL,
+        vaccination_count INTEGER     NOT NULL
+    );
+    SELECT create_hypertable('vaccination_trend', 'hour', if_not_exists => TRUE);
+
+    -- Phase 3: Outbreak prediction output
+    CREATE TABLE IF NOT EXISTS outbreak_predictions (
+        predicted_at          TIMESTAMPTZ DEFAULT now(),
+        hour                  TIMESTAMPTZ NOT NULL,
+        region                TEXT        NOT NULL,
+        total_events          INTEGER,
+        avg_severity          DOUBLE PRECISION,
+        min_available_beds    INTEGER,
+        vaccination_count     INTEGER DEFAULT 0,
+        event_score           DOUBLE PRECISION,
+        severity_score        DOUBLE PRECISION,
+        bed_pressure_score    DOUBLE PRECISION,
+        vaccination_score     DOUBLE PRECISION,
+        outbreak_risk_score   DOUBLE PRECISION,
+        outbreak_risk_level   TEXT
+    );
+    SELECT create_hypertable('outbreak_predictions', 'predicted_at', if_not_exists => TRUE);
+
+    -- Phase 2.5 / Phase 3 Category D: persistent data-quality monitoring
+    CREATE TABLE IF NOT EXISTS data_quality_checks (
+        checked_at       TIMESTAMPTZ DEFAULT now(),
+        check_name       TEXT        NOT NULL,
+        table_name       TEXT,
+        status           TEXT        NOT NULL,
+        row_count        BIGINT,
+        latest_timestamp TIMESTAMPTZ,
+        message          TEXT
+    );
+    SELECT create_hypertable('data_quality_checks', 'checked_at', if_not_exists => TRUE);
+
+    -- Indexes for common query patterns (Phase 3 alerting + dashboards)
+    CREATE INDEX IF NOT EXISTS idx_hourly_rate_region ON hourly_event_rate (region, hour DESC);
+    CREATE INDEX IF NOT EXISTS idx_severity_region    ON severity_trend (region, window_start DESC);
+    CREATE INDEX IF NOT EXISTS idx_bed_region         ON bed_availability (region, hour DESC);
+    CREATE INDEX IF NOT EXISTS idx_vaccination_region ON vaccination_trend (region, hour DESC);
+    CREATE INDEX IF NOT EXISTS idx_outbreak_region    ON outbreak_predictions (region, hour DESC);
+    CREATE INDEX IF NOT EXISTS idx_quality_status     ON data_quality_checks (status, checked_at DESC);

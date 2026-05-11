@@ -1,0 +1,55 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: spark-etl-test
+  namespace: ds551-2026-spring-7726b8
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: spark-sa
+      restartPolicy: Never
+      containers:
+      - name: spark-job
+        image: apache/spark:3.5.0
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            pip install --quiet --no-cache-dir --target=/tmp/pkgs psycopg2-binary==2.9.9
+            export PYTHONPATH=/tmp/pkgs:$PYTHONPATH
+            /opt/spark/bin/spark-submit \
+              --master local[*] \
+              --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.postgresql:postgresql:42.6.0 \
+              --conf spark.driver.extraJavaOptions=-Divy.cache.dir=/tmp/ivy2 \
+              --conf spark.jars.ivy=/tmp/ivy2 \
+              /app/etl.py
+            EXIT_CODE=$?
+            echo "EXIT CODE: $EXIT_CODE"
+            if [ $EXIT_CODE -ne 0 ]; then sleep 300; fi
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        env:
+        - name: KAFKA_BOOTSTRAP
+          value: "kafka.ds551-2026-spring-7726b8.svc.cluster.local:9092"
+        - name: DB_HOST
+          value: "timescaledb-service.ds551-2026-spring-7726b8.svc.cluster.local"
+        - name: DB_PORT
+          value: "5432"
+        - name: DB_NAME
+          value: "analytics"
+        - name: DB_USER
+          value: "postgres"
+        - name: DB_PASSWORD
+          value: "team05-epidemic"
+        volumeMounts:
+        - name: etl-script
+          mountPath: /app
+      volumes:
+      - name: etl-script
+        configMap:
+          name: etl-script

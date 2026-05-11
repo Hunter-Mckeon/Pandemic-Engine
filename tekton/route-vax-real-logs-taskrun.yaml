@@ -1,0 +1,28 @@
+apiVersion: tekton.dev/v1
+kind: TaskRun
+metadata:
+  generateName: route-vax-real-logs-
+  labels:
+    evidence-purpose: co2026-01-routing
+  annotations:
+    note: "Evidence-only route replay from the real validated topic; rerunning can duplicate routed output."
+spec:
+  taskRef:
+    name: route-and-enrich
+  params:
+    - name: kafka-bootstrap
+      value: "kafka-team05:9092"
+    - name: input-topic
+      value: "ds551-s26.team05.validated"
+    - name: symptom-topic
+      value: "ds551-s26.team05.symptom_reports"
+    - name: clinic-topic
+      value: "ds551-s26.team05.clinic_visits"
+    - name: hospital-topic
+      value: "ds551-s26.team05.hospital_admissions"
+    - name: vaccination-topic
+      value: "ds551-s26.team05.vaccination_records"
+    - name: team-id
+      value: "team05"
+    - name: batch-size
+      value: "12000"
